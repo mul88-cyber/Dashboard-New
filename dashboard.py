@@ -12,28 +12,34 @@ import numpy as np
 bucket_name = "stock-csvku"
 file_name = "hasil_analisis_saham.csv"
 
-# Fungsi untuk membaca data dari GCS
+# Fungsi untuk membaca data dari GCS tanpa autentikasi
 @st.cache_data(ttl=3600)  # Cache data selama 1 jam
 def load_data():
-    # Untuk di Streamlit Cloud, gunakan service account dari secrets
-    if 'gcp_service_account' in st.secrets:
-        client = storage.Client.from_service_account_info(st.secrets["gcp_service_account"])
-    else:
-        # Untuk local development, gunakan service account file
-        client = storage.Client.from_service_account_json("service-account-key.json")
+    try:
+        # Buat client tanpa kredensial (akses publik)
+        client = storage.Client.create_anonymous_client()
+        
+        # Akses bucket dan file
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(file_name)
+        
+        # Download data
+        data = blob.download_as_text()
+        return pd.read_csv(StringIO(data))
     
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(file_name)
-    data = blob.download_as_string().decode("utf-8")
-    return pd.read_csv(StringIO(data))
+    except Exception as e:
+        st.error(f"❌ Gagal memuat data: {e}")
+        st.error("Pastikan bucket GCS diatur sebagai publik")
+        return pd.DataFrame()  # Return dataframe kosong jika error
 
 # Load data
-try:
-    df = load_data()
+df = load_data()
+
+# Proses data hanya jika tidak kosong
+if not df.empty:
     df['Date'] = pd.to_datetime(df['Date'])
     st.success("✅ Data berhasil dimuat dari Google Cloud Storage")
-except Exception as e:
-    st.error(f"❌ Gagal memuat data: {e}")
+else:
     st.stop()
 
 # Konfigurasi halaman
@@ -81,10 +87,11 @@ if not filtered_df.empty:
     col1, col2, col3, col4 = st.columns(4)
     
     col1.metric("Harga Terakhir", f"Rp {latest['Close']:,.2f}", 
-                f"{filtered_df['Close'].pct_change()[-1]*100:.2f}%")
+                f"{filtered_df['Close'].pct_change()[-1]*100:.2f}%" if len(filtered_df) > 1 else "N/A")
     
     col2.metric("Volume", f"{latest['Volume']:,.0f}", 
-                f"{(latest['Volume'] - filtered_df['Volume'].mean())/filtered_df['Volume'].mean()*100:.2f}% vs rata-rata")
+                f"{(latest['Volume'] - filtered_df['Volume'].mean())/filtered_df['Volume'].mean()*100:.2f}% vs rata-rata" 
+                if filtered_df['Volume'].mean() > 0 else "N/A")
     
     col3.metric("Sinyal Terkini", latest['Composite_Signal'], 
                 f"Keyakinan: {latest['Signal_Confidence']:.1f}%")
@@ -142,25 +149,6 @@ with tab1:
                     hovertext=signal_df['Composite_Signal'] + '<br>Keyakinan: ' + signal_df['Signal_Confidence'].astype(str) + '%'
                 ))
         
-        # Tambahkan support dan resistance
-        fig.add_trace(go.Scatter(
-            x=filtered_df['Date'], 
-            y=filtered_df['Support'],
-            mode='lines',
-            name='Support',
-            line=dict(color='#2ca02c', width=1, dash='dot'),
-            visible='legendonly'
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=filtered_df['Date'], 
-            y=filtered_df['Resistance'],
-            mode='lines',
-            name='Resistance',
-            line=dict(color='#d62728', width=1, dash='dot'),
-            visible='legendonly'
-        ))
-        
         # Konfigurasi layout
         fig.update_layout(
             title=f'Perjalanan Harga {selected_stock}',
@@ -192,12 +180,13 @@ with tab2:
                 marker_color='#1f77b4'
             ))
             
-            fig_vol.add_trace(go.Scatter(
-                x=filtered_df['Date'],
-                y=filtered_df['Volume_MA_20'],
-                name='MA 20 Hari',
-                line=dict(color='#ff7f0e', width=2)
-            ))
+            if 'Volume_MA_20' in filtered_df:
+                fig_vol.add_trace(go.Scatter(
+                    x=filtered_df['Date'],
+                    y=filtered_df['Volume_MA_20'],
+                    name='MA 20 Hari',
+                    line=dict(color='#ff7f0e', width=2)
+                ))
             
             fig_vol.update_layout(
                 title='Volume Perdagangan',
@@ -237,21 +226,6 @@ with tab2:
             )
             
             st.plotly_chart(fig_foreign, use_container_width=True)
-        
-        # Grafik Ketidakseimbangan Bid/Offer
-        st.subheader("Ketidakseimbangan Bid/Offer")
-        fig_imbalance = px.area(
-            filtered_df, 
-            x='Date', 
-            y='Bid_Offer_Imbalance',
-            title='Bid/Offer Imbalance',
-            labels={'Bid_Offer_Imbalance': 'Ketidakseimbangan'},
-            color_discrete_sequence=['#17becf']
-        )
-        
-        fig_imbalance.add_hline(y=0, line_dash="dash", line_color="gray")
-        fig_imbalance.update_layout(height=300, template='plotly_white')
-        st.plotly_chart(fig_imbalance, use_container_width=True)
     else:
         st.warning("Tidak ada data yang tersedia untuk filter yang dipilih")
 
@@ -263,73 +237,62 @@ with tab3:
         
         with col1:
             # Grafik Momentum
-            fig_momentum = go.Figure()
-            
-            fig_momentum.add_trace(go.Scatter(
-                x=filtered_df['Date'],
-                y=filtered_df['Momentum_5D'],
-                name='Momentum 5 Hari',
-                line=dict(color='#1f77b4', width=2)
-            ))
-            
-            fig_momentum.add_trace(go.Scatter(
-                x=filtered_df['Date'],
-                y=filtered_df['Momentum_20D'],
-                name='Momentum 20 Hari',
-                line=dict(color='#ff7f0e', width=2)
-            ))
-            
-            fig_momentum.add_hline(y=0, line_dash="dash", line_color="gray")
-            fig_momentum.update_layout(
-                title='Momentum Harga',
-                xaxis_title='Tanggal',
-                yaxis_title='Momentum',
-                template='plotly_white',
-                height=400
-            )
-            
-            st.plotly_chart(fig_momentum, use_container_width=True)
+            if 'Momentum_5D' in filtered_df and 'Momentum_20D' in filtered_df:
+                fig_momentum = go.Figure()
+                
+                fig_momentum.add_trace(go.Scatter(
+                    x=filtered_df['Date'],
+                    y=filtered_df['Momentum_5D'],
+                    name='Momentum 5 Hari',
+                    line=dict(color='#1f77b4', width=2)
+                ))
+                
+                fig_momentum.add_trace(go.Scatter(
+                    x=filtered_df['Date'],
+                    y=filtered_df['Momentum_20D'],
+                    name='Momentum 20 Hari',
+                    line=dict(color='#ff7f0e', width=2)
+                ))
+                
+                fig_momentum.add_hline(y=0, line_dash="dash", line_color="gray")
+                fig_momentum.update_layout(
+                    title='Momentum Harga',
+                    xaxis_title='Tanggal',
+                    yaxis_title='Momentum',
+                    template='plotly_white',
+                    height=400
+                )
+                
+                st.plotly_chart(fig_momentum, use_container_width=True)
         
         with col2:
             # Grafik Relative Strength
-            fig_rs = go.Figure()
-            
-            fig_rs.add_trace(go.Scatter(
-                x=filtered_df['Date'],
-                y=filtered_df['RS'],
-                name='Relative Strength',
-                line=dict(color='#1f77b4', width=2)
-            ))
-            
-            fig_rs.add_trace(go.Scatter(
-                x=filtered_df['Date'],
-                y=filtered_df['RS_MA_10'],
-                name='RS MA 10 Hari',
-                line=dict(color='#ff7f0e', width=2)
-            ))
-            
-            fig_rs.update_layout(
-                title='Kekuatan Relatif vs Pasar',
-                xaxis_title='Tanggal',
-                yaxis_title='Relative Strength',
-                template='plotly_white',
-                height=400
-            )
-            
-            st.plotly_chart(fig_rs, use_container_width=True)
-        
-        # Grafik Volatilitas (ATR)
-        st.subheader("Volatilitas (ATR)")
-        fig_atr = px.line(
-            filtered_df, 
-            x='Date', 
-            y='ATR_14',
-            title='Average True Range (14 Hari)',
-            labels={'ATR_14': 'ATR'},
-            color_discrete_sequence=['#e377c2']
-        )
-        fig_atr.update_layout(height=300, template='plotly_white')
-        st.plotly_chart(fig_atr, use_container_width=True)
+            if 'RS' in filtered_df and 'RS_MA_10' in filtered_df:
+                fig_rs = go.Figure()
+                
+                fig_rs.add_trace(go.Scatter(
+                    x=filtered_df['Date'],
+                    y=filtered_df['RS'],
+                    name='Relative Strength',
+                    line=dict(color='#1f77b4', width=2)
+                ))
+                
+                fig_rs.add_trace(go.Scatter(
+                    x=filtered_df['Date'],
+                    y=filtered_df['RS_MA_10'],
+                    name='RS MA 10 Hari',
+                    line=dict(color='#ff7f0e', width=2)
+                ))
+                
+                fig_rs.update_layout(
+                    title='Kekuatan Relatif vs Pasar',
+                    xaxis_title='Tanggal',
+                    yaxis_title='Relative Strength',
+                    template='plotly_white',
+                    height=400
+                )
+                
+                st.plotly_chart(fig_rs, use_container_width=True)
     else:
         st.warning("Tidak ada data yang tersedia untuk filter yang dipilih")
 
@@ -340,17 +303,6 @@ with tab4:
         # Tampilkan data dalam bentuk tabel
         st.dataframe(
             filtered_df.sort_values('Date', ascending=False),
-            column_config={
-                "Date": st.column_config.DatetimeColumn(format="YYYY-MM-DD"),
-                "Close": st.column_config.NumberColumn(format="Rp %.2f"),
-                "VWAP": st.column_config.NumberColumn(format="Rp %.2f"),
-                "Signal_Confidence": st.column_config.ProgressColumn(
-                    format="%.1f%%", min_value=0, max_value=100
-                ),
-                "Composite_Signal": st.column_config.TextColumn(
-                    help="Sinyal komposit berdasarkan analisis multi-faktor"
-                )
-            },
             hide_index=True,
             height=500,
             use_container_width=True
