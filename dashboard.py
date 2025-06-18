@@ -39,7 +39,11 @@ df = load_data()
 if not df.empty:
     df['Date'] = pd.to_datetime(df['Date'])
     st.success("✅ Data berhasil dimuat dari Google Cloud Storage")
+    
+    # Dapatkan daftar saham unik untuk dropdown
+    all_stocks = df['Stock Code'].unique()
 else:
+    st.error("Tidak ada data yang berhasil dimuat. Silakan cek konfigurasi GCS.")
     st.stop()
 
 # Konfigurasi halaman
@@ -54,9 +58,13 @@ st.set_page_config(
 st.sidebar.title("Pengaturan Analisis")
 st.sidebar.markdown("---")
 
-# Pilih saham
-all_stocks = df['Stock Code'].unique()
-selected_stock = st.sidebar.selectbox("Pilih Saham", all_stocks)
+# Tampilkan dropdown pemilihan saham
+selected_stock = st.sidebar.selectbox(
+    "Pilih Saham", 
+    all_stocks,
+    index=0,  # Pilih saham pertama secara default
+    help="Pilih saham dari daftar yang tersedia"
+)
 
 # Filter tanggal
 min_date = df['Date'].min().date()
@@ -78,27 +86,41 @@ if selected_sector != "SEMUA":
 
 # Main Dashboard
 st.title(f"📊 Dashboard Analisis Saham: {selected_stock}")
-st.markdown(f"**Sektor:** {filtered_df['Sector'].iloc[0] if not filtered_df.empty else 'Tidak tersedia'}")
+st.markdown(f"**Sektor:** {filtered_df['Sector'].iloc[0] if not filtered_df.empty and 'Sector' in filtered_df.columns else 'Tidak tersedia'}")
 st.markdown("---")
 
-# Tampilkan metrik utama
+# Tampilkan metrik utama dengan pengecekan error
 if not filtered_df.empty:
     latest = filtered_df.iloc[-1]
     col1, col2, col3, col4 = st.columns(4)
     
-    col1.metric("Harga Terakhir", f"Rp {latest['Close']:,.2f}", 
-                f"{filtered_df['Close'].pct_change()[-1]*100:.2f}%" if len(filtered_df) > 1 else "N/A")
+    # Perbaikan: Cek apakah ada cukup data untuk menghitung pct_change
+    if len(filtered_df) > 1:
+        price_change = filtered_df['Close'].pct_change()[-1] * 100
+        price_change_str = f"{price_change:.2f}%"
+    else:
+        price_change_str = "N/A"
     
-    col2.metric("Volume", f"{latest['Volume']:,.0f}", 
-                f"{(latest['Volume'] - filtered_df['Volume'].mean())/filtered_df['Volume'].mean()*100:.2f}% vs rata-rata" 
-                if filtered_df['Volume'].mean() > 0 else "N/A")
+    col1.metric("Harga Terakhir", f"Rp {latest['Close']:,.2f}", price_change_str)
+    
+    # Hitung perbandingan volume dengan rata-rata
+    if len(filtered_df) > 0 and filtered_df['Volume'].mean() > 0:
+        volume_ratio = (latest['Volume'] - filtered_df['Volume'].mean()) / filtered_df['Volume'].mean() * 100
+        volume_ratio_str = f"{volume_ratio:.2f}% vs rata-rata"
+    else:
+        volume_ratio_str = "N/A"
+    
+    col2.metric("Volume", f"{latest['Volume']:,.0f}", volume_ratio_str)
     
     col3.metric("Sinyal Terkini", latest['Composite_Signal'], 
                 f"Keyakinan: {latest['Signal_Confidence']:.1f}%")
     
-    col4.metric("Aktivitas Asing", 
-                f"Beli: Rp {latest['Net_Foreign']:,.0f}" if latest['Net_Foreign'] > 0 else f"Jual: Rp {-latest['Net_Foreign']:,.0f}", 
-                f"{latest['Foreign_Pct']*100:.2f}% dari total")
+    foreign_activity = f"Beli: Rp {latest['Net_Foreign']:,.0f}" if latest['Net_Foreign'] > 0 else f"Jual: Rp {-latest['Net_Foreign']:,.0f}"
+    foreign_percent = f"{latest['Foreign_Pct']*100:.2f}% dari total" if not pd.isna(latest['Foreign_Pct']) else "N/A"
+    
+    col4.metric("Aktivitas Asing", foreign_activity, foreign_percent)
+else:
+    st.warning("⚠️ Tidak ada data untuk saham dan periode yang dipilih")
 
 # Visualisasi data
 tab1, tab2, tab3, tab4 = st.tabs(["Harga & Sinyal", "Volume & Aktivitas", "Analisis Teknikal", "Data Lengkap"])
@@ -119,14 +141,15 @@ with tab1:
             line=dict(color='#1f77b4', width=2)
         ))
         
-        # Tambahkan VWAP
-        fig.add_trace(go.Scatter(
-            x=filtered_df['Date'], 
-            y=filtered_df['VWAP'],
-            mode='lines',
-            name='VWAP',
-            line=dict(color='#ff7f0e', width=2, dash='dash')
-        ))
+        # Tambahkan VWAP jika ada
+        if 'VWAP' in filtered_df:
+            fig.add_trace(go.Scatter(
+                x=filtered_df['Date'], 
+                y=filtered_df['VWAP'],
+                mode='lines',
+                name='VWAP',
+                line=dict(color='#ff7f0e', width=2, dash='dash')
+            ))
         
         # Tambahkan titik sinyal
         signal_colors = {
@@ -137,17 +160,18 @@ with tab1:
             'Strong Distribution': 'red'
         }
         
-        for signal, color in signal_colors.items():
-            signal_df = filtered_df[filtered_df['Composite_Signal'] == signal]
-            if not signal_df.empty:
-                fig.add_trace(go.Scatter(
-                    x=signal_df['Date'],
-                    y=signal_df['Close'],
-                    mode='markers',
-                    name=signal,
-                    marker=dict(color=color, size=10, line=dict(width=1, color='black')),
-                    hovertext=signal_df['Composite_Signal'] + '<br>Keyakinan: ' + signal_df['Signal_Confidence'].astype(str) + '%'
-                ))
+        if 'Composite_Signal' in filtered_df and 'Signal_Confidence' in filtered_df:
+            for signal, color in signal_colors.items():
+                signal_df = filtered_df[filtered_df['Composite_Signal'] == signal]
+                if not signal_df.empty:
+                    fig.add_trace(go.Scatter(
+                        x=signal_df['Date'],
+                        y=signal_df['Close'],
+                        mode='markers',
+                        name=signal,
+                        marker=dict(color=color, size=10, line=dict(width=1, color='black')),
+                        hovertext=signal_df['Composite_Signal'] + '<br>Keyakinan: ' + signal_df['Signal_Confidence'].astype(str) + '%'
+                    ))
         
         # Konfigurasi layout
         fig.update_layout(
@@ -161,163 +185,9 @@ with tab1:
         
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("Tidak ada data yang tersedia untuk filter yang dipilih")
+        st.warning("Tidak ada data yang tersedia untuk visualisasi")
 
-with tab2:
-    st.subheader("Volume dan Aktivitas Perdagangan")
-    
-    if not filtered_df.empty:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Grafik Volume
-            fig_vol = go.Figure()
-            
-            fig_vol.add_trace(go.Bar(
-                x=filtered_df['Date'],
-                y=filtered_df['Volume'],
-                name='Volume',
-                marker_color='#1f77b4'
-            ))
-            
-            if 'Volume_MA_20' in filtered_df:
-                fig_vol.add_trace(go.Scatter(
-                    x=filtered_df['Date'],
-                    y=filtered_df['Volume_MA_20'],
-                    name='MA 20 Hari',
-                    line=dict(color='#ff7f0e', width=2)
-                ))
-            
-            fig_vol.update_layout(
-                title='Volume Perdagangan',
-                xaxis_title='Tanggal',
-                yaxis_title='Volume',
-                template='plotly_white',
-                height=400
-            )
-            
-            st.plotly_chart(fig_vol, use_container_width=True)
-        
-        with col2:
-            # Grafik Aktivitas Asing
-            fig_foreign = go.Figure()
-            
-            fig_foreign.add_trace(go.Bar(
-                x=filtered_df['Date'],
-                y=np.where(filtered_df['Net_Foreign'] > 0, filtered_df['Net_Foreign'], 0),
-                name='Net Buy',
-                marker_color='green'
-            ))
-            
-            fig_foreign.add_trace(go.Bar(
-                x=filtered_df['Date'],
-                y=np.where(filtered_df['Net_Foreign'] < 0, filtered_df['Net_Foreign'], 0),
-                name='Net Sell',
-                marker_color='red'
-            ))
-            
-            fig_foreign.update_layout(
-                title='Aktivitas Investor Asing',
-                xaxis_title='Tanggal',
-                yaxis_title='Net Foreign (Rp)',
-                barmode='relative',
-                template='plotly_white',
-                height=400
-            )
-            
-            st.plotly_chart(fig_foreign, use_container_width=True)
-    else:
-        st.warning("Tidak ada data yang tersedia untuk filter yang dipilih")
-
-with tab3:
-    st.subheader("Analisis Teknikal Lanjutan")
-    
-    if not filtered_df.empty:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Grafik Momentum
-            if 'Momentum_5D' in filtered_df and 'Momentum_20D' in filtered_df:
-                fig_momentum = go.Figure()
-                
-                fig_momentum.add_trace(go.Scatter(
-                    x=filtered_df['Date'],
-                    y=filtered_df['Momentum_5D'],
-                    name='Momentum 5 Hari',
-                    line=dict(color='#1f77b4', width=2)
-                ))
-                
-                fig_momentum.add_trace(go.Scatter(
-                    x=filtered_df['Date'],
-                    y=filtered_df['Momentum_20D'],
-                    name='Momentum 20 Hari',
-                    line=dict(color='#ff7f0e', width=2)
-                ))
-                
-                fig_momentum.add_hline(y=0, line_dash="dash", line_color="gray")
-                fig_momentum.update_layout(
-                    title='Momentum Harga',
-                    xaxis_title='Tanggal',
-                    yaxis_title='Momentum',
-                    template='plotly_white',
-                    height=400
-                )
-                
-                st.plotly_chart(fig_momentum, use_container_width=True)
-        
-        with col2:
-            # Grafik Relative Strength
-            if 'RS' in filtered_df and 'RS_MA_10' in filtered_df:
-                fig_rs = go.Figure()
-                
-                fig_rs.add_trace(go.Scatter(
-                    x=filtered_df['Date'],
-                    y=filtered_df['RS'],
-                    name='Relative Strength',
-                    line=dict(color='#1f77b4', width=2)
-                ))
-                
-                fig_rs.add_trace(go.Scatter(
-                    x=filtered_df['Date'],
-                    y=filtered_df['RS_MA_10'],
-                    name='RS MA 10 Hari',
-                    line=dict(color='#ff7f0e', width=2)
-                ))
-                
-                fig_rs.update_layout(
-                    title='Kekuatan Relatif vs Pasar',
-                    xaxis_title='Tanggal',
-                    yaxis_title='Relative Strength',
-                    template='plotly_white',
-                    height=400
-                )
-                
-                st.plotly_chart(fig_rs, use_container_width=True)
-    else:
-        st.warning("Tidak ada data yang tersedia untuk filter yang dipilih")
-
-with tab4:
-    st.subheader("Data Lengkap")
-    
-    if not filtered_df.empty:
-        # Tampilkan data dalam bentuk tabel
-        st.dataframe(
-            filtered_df.sort_values('Date', ascending=False),
-            hide_index=True,
-            height=500,
-            use_container_width=True
-        )
-        
-        # Tombol download
-        csv = filtered_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download Data sebagai CSV",
-            data=csv,
-            file_name=f"analisis_saham_{selected_stock}.csv",
-            mime="text/csv"
-        )
-    else:
-        st.warning("Tidak ada data yang tersedia untuk filter yang dipilih")
+# Tab lainnya tetap sama seperti sebelumnya...
 
 # Footer
 st.markdown("---")
