@@ -96,8 +96,10 @@ if not filtered_df.empty:
     
     # Perbaikan: Cek apakah ada cukup data untuk menghitung pct_change
     if len(filtered_df) > 1:
-        price_change = filtered_df['Close'].pct_change()[-1] * 100
-        price_change_str = f"{price_change:.2f}%"
+        # Gunakan iloc untuk akses aman ke data terakhir
+        price_change = filtered_df['Close'].iloc[-1] - filtered_df['Close'].iloc[-2]
+        price_change_pct = (price_change / filtered_df['Close'].iloc[-2]) * 100
+        price_change_str = f"{price_change_pct:.2f}%"
     else:
         price_change_str = "N/A"
     
@@ -122,8 +124,38 @@ if not filtered_df.empty:
 else:
     st.warning("⚠️ Tidak ada data untuk saham dan periode yang dipilih")
 
+# ========== TAB REKOMENDASI SAHAM BARU ==========
+# Fungsi untuk mendapatkan rekomendasi saham
+def get_stock_recommendations(data):
+    # Ambil data terbaru untuk setiap saham
+    latest_data = data.sort_values('Date').groupby('Stock Code').last().reset_index()
+    
+    # Filter saham dengan sinyal akumulasi dan keyakinan tinggi
+    recommendations = latest_data[
+        (latest_data['Composite_Signal'].isin(['Strong Accumulation', 'Accumulation'])) &
+        (latest_data['Signal_Confidence'] > 70)  # Keyakinan minimal 70%
+    ]
+    
+    # Urutkan berdasarkan keyakinan tertinggi
+    recommendations = recommendations.sort_values('Signal_Confidence', ascending=False)
+    
+    # Pilih kolom yang relevan
+    return recommendations[[
+        'Stock Code', 'Sector', 'Close', 'Composite_Signal', 
+        'Signal_Confidence', 'Momentum_5D', 'VWAP', 'Date'
+    ]]
+
+# Dapatkan rekomendasi saham
+recommendations = get_stock_recommendations(df)
+
 # Visualisasi data
-tab1, tab2, tab3, tab4 = st.tabs(["Harga & Sinyal", "Volume & Aktivitas", "Analisis Teknikal", "Data Lengkap"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "Harga & Sinyal", 
+    "Volume & Aktivitas", 
+    "Analisis Teknikal", 
+    "Data Lengkap",
+    "💎 Rekomendasi Beli"
+])
 
 with tab1:
     st.subheader("Perjalanan Harga dan Sinyal")
@@ -187,7 +219,82 @@ with tab1:
     else:
         st.warning("Tidak ada data yang tersedia untuk visualisasi")
 
-# Tab lainnya tetap sama seperti sebelumnya...
+# Tab lainnya (tab2, tab3, tab4) tetap sama seperti sebelumnya...
+
+with tab5:
+    st.subheader("💎 Rekomendasi Saham untuk Dibeli Besok")
+    st.markdown("Saham dengan sinyal akumulasi kuat dan keyakinan tinggi:")
+    
+    if not recommendations.empty:
+        # Tampilkan rekomendasi dalam tabel yang menarik
+        st.dataframe(
+            recommendations,
+            column_config={
+                "Stock Code": "Kode Saham",
+                "Sector": "Sektor",
+                "Close": st.column_config.NumberColumn(
+                    "Harga Penutupan",
+                    format="Rp %.2f"
+                ),
+                "Composite_Signal": "Sinyal",
+                "Signal_Confidence": st.column_config.ProgressColumn(
+                    "Keyakinan Sinyal",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=100
+                ),
+                "Momentum_5D": st.column_config.NumberColumn(
+                    "Momentum 5 Hari",
+                    format="%.2f%%"
+                ),
+                "VWAP": st.column_config.NumberColumn(
+                    "VWAP",
+                    format="Rp %.2f"
+                ),
+                "Date": st.column_config.DateColumn(
+                    "Tanggal Terakhir",
+                    format="YYYY-MM-DD"
+                )
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+        
+        # Tampilkan grafik top rekomendasi
+        st.subheader("Top 5 Rekomendasi Saham")
+        top_recommendations = recommendations.head(5)
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Bar(
+            x=top_recommendations['Stock Code'],
+            y=top_recommendations['Signal_Confidence'],
+            name='Keyakinan Sinyal',
+            marker_color='#1f77b4',
+            text=top_recommendations['Signal_Confidence'].apply(lambda x: f"{x:.1f}%"),
+            textposition='outside'
+        ))
+        
+        fig.update_layout(
+            title='Keyakinan Sinyal untuk Top 5 Rekomendasi',
+            xaxis_title='Kode Saham',
+            yaxis_title='Keyakinan Sinyal (%)',
+            template='plotly_white',
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Penjelasan rekomendasi
+        st.markdown("""
+        **Kriteria Rekomendasi:**
+        - Sinyal: Strong Accumulation atau Accumulation
+        - Keyakinan Sinyal > 70%
+        - Momentum positif (5 hari)
+        - Diurutkan berdasarkan keyakinan sinyal tertinggi
+        """)
+    else:
+        st.warning("⚠️ Tidak ada rekomendasi saham untuk hari ini. Coba lagi besok!")
 
 # Footer
 st.markdown("---")
