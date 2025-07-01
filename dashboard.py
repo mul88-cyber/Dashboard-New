@@ -1,211 +1,65 @@
-# 📦 Import library
-from google.colab import files
-from google.auth.transport.requests import Request
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from google.cloud import storage
+# streamlit_app.py
+import streamlit as st
 import pandas as pd
-import time
-import re
+import plotly.express as px
 
-# 📎 Upload file: JSON + sector.csv
-print("📎 Silakan upload file JSON key service account & sector.csv...")
-uploaded = files.upload()
-json_file_name = [f for f in uploaded if f.endswith('.json')][0]
-sector_file_name = [f for f in uploaded if f.lower().startswith('sector') and f.endswith('.csv')][0]
+# Load data dari hasil_gabungan.csv
+@st.cache_data
+def load_data():
+    return pd.read_csv("hasil_gabungan.csv", parse_dates=["Last Trading Date"])
 
-# ⚙️ Konfigurasi
-SERVICE_ACCOUNT_FILE = json_file_name
-FOLDER_ID = '1_BL0w0TyFG-Mo-zr8OiKMzqqct92pTKo'
-SHEET_NAME = 'Sheet1'
-GCS_BUCKET = 'stock-csvku'
-GCS_FILENAME = 'hasil_gabungan.csv'
+df = load_data()
 
-# 🔐 Setup credentials
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE,
-    scopes=[
-        'https://www.googleapis.com/auth/spreadsheets.readonly',
-        'https://www.googleapis.com/auth/drive.readonly',
-        'https://www.googleapis.com/auth/devstorage.full_control'
-    ]
-)
+st.set_page_config(page_title="📊 Money Flow Dashboard", layout="wide")
+st.title("📈 Money Flow & Smart Money Tracker")
 
-# 🗓️ Fungsi konversi tanggal Indonesia → datetime
-def convert_indonesian_date(date_str):
-    bulan_map = {
-        "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04", "Mei": "05", "Jun": "06",
-        "Jul": "07", "Agt": "08", "Sep": "09", "Okt": "10", "Nov": "11", "Des": "12"
-    }
-    try:
-        for indo, num in bulan_map.items():
-            if indo in date_str:
-                return pd.to_datetime(date_str.replace(indo, num), format="%d %m %Y")
-        return pd.to_datetime(date_str, errors='coerce')
-    except:
-        return pd.NaT
+# Sidebar: Filter global
+with st.sidebar:
+    st.header("🔎 Filter")
+    selected_date = st.date_input("Tanggal", df["Last Trading Date"].max().date())
+    sectors = st.multiselect("Pilih Sektor", sorted(df["Sector"].dropna().unique()), default=None)
+    sort_by = st.selectbox("Urutkan Berdasarkan", ["MFI14", "Volume", "Money Flow"], index=0)
 
-def extract_date_from_filename(filename):
-    match = re.search(r"(\d{8})", filename)
-    if match:
-        try:
-            return pd.to_datetime(match.group(1), format="%Y%m%d")
-        except:
-            return pd.NaT
-    return pd.NaT
+# Filter data
+filtered_df = df[df["Last Trading Date"] == pd.to_datetime(selected_date)]
+if sectors:
+    filtered_df = filtered_df[filtered_df["Sector"].isin(sectors)]
 
-def get_sheets_in_folder(folder_id):
-    drive_service = build('drive', 'v3', credentials=credentials)
-    query = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet'"
-    all_files = []
-    page_token = None
-    while True:
-        try:
-            results = drive_service.files().list(
-                q=query,
-                fields="nextPageToken, files(id, name)",
-                pageToken=page_token
-            ).execute()
-            files_list = results.get('files', [])
-            if not files_list:
-                break
-            all_files.extend(files_list)
-            print(f"✅ Ditemukan {len(files_list)} file. Total: {len(all_files)}")
-            page_token = results.get('nextPageToken')
-            if not page_token:
-                break
-        except Exception as e:
-            print(f"❌ Error Drive API: {e}")
-            break
-    return all_files
+# --- Top Money Flow Section ---
+st.subheader("🚀 Top Saham Berdasarkan Money Flow")
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.dataframe(filtered_df.sort_values(by=sort_by, ascending=False).head(15), use_container_width=True)
+with col2:
+    top_chart = px.bar(filtered_df.sort_values(by=sort_by, ascending=False).head(10), 
+                       x="Stock Code", y=sort_by, color="Sector",
+                       title=f"Top 10 Saham berdasarkan {sort_by}")
+    st.plotly_chart(top_chart, use_container_width=True)
 
-def read_sheet_data(sheet_id, sheet_name, max_retries=3):
-    sheets_service = build('sheets', 'v4', credentials=credentials)
-    range_name = f"{sheet_name}!A:Z"
-    for attempt in range(max_retries):
-        try:
-            result = sheets_service.spreadsheets().values().get(
-                spreadsheetId=sheet_id, range=range_name).execute()
-            return result.get('values', [])
-        except Exception as e:
-            print(f"⚠️ Gagal baca sheet (percobaan {attempt+1}): {e}")
-            time.sleep(5)
-    return []
+# --- Analisis Per Saham ---
+st.subheader("🔍 Analisa Per Saham")
+stocks = sorted(df["Stock Code"].dropna().unique())
+selected_stock = st.selectbox("Pilih Kode Saham", stocks, index=stocks.index("TLKM") if "TLKM" in stocks else 0)
 
-def upload_to_gcs(dataframe, bucket_name, destination_blob_name, max_retries=3):
-    client = storage.Client(credentials=credentials)
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(destination_blob_name)
-    csv_data = dataframe.to_csv(index=False)
-    for attempt in range(max_retries):
-        try:
-            print(f"📤 Upload ke GCS: {destination_blob_name} (percobaan {attempt+1})")
-            blob.upload_from_string(csv_data, content_type='text/csv')
-            print(f"✅ Upload sukses ke {bucket_name}/{destination_blob_name}")
-            return True
-        except Exception as e:
-            print(f"⚠️ Upload gagal: {e}")
-            time.sleep(10)
-    return False
+saham_df = df[df["Stock Code"] == selected_stock].sort_values("Last Trading Date")
 
-def main():
-    print("🚀 Mulai proses penggabungan...")
-    all_data = []
-    sheets = get_sheets_in_folder(FOLDER_ID)
-    if not sheets:
-        print("⚠️ Tidak ada file ditemukan.")
-        return
+colA, colB, colC = st.columns(3)
+with colA:
+    st.metric("💸 MFI Hari Ini", f'{saham_df.iloc[-1]["MFI14"]} ({saham_df.iloc[-1]["MFI Signal"]})')
+with colB:
+    st.metric("📥 Foreign Flow", saham_df.iloc[-1]["Foreign Flow"])
+with colC:
+    st.metric("📊 Final Signal", saham_df.iloc[-1]["Final Signal"])
 
-    headers = None
-    for i, sheet in enumerate(sheets):
-        print(f"📄 Membaca: {sheet['name']} ({i+1}/{len(sheets)})")
-        rows = read_sheet_data(sheet['id'], SHEET_NAME)
-        if not rows or len(rows) < 2:
-            print(f"🚫 Kosong: {sheet['name']}")
-            continue
-        if i == 0:
-            headers = rows[0]
-            headers.append("Source File")
-        for row in rows[1:]:
-            row += [sheet["name"]]
-            all_data.append(row)
+st.markdown("### Trend Money Flow & Volume")
+fig = px.line(saham_df, x="Last Trading Date", y=["Money Flow", "Volume"], markers=True)
+fig.update_layout(yaxis_title="Jumlah")
+st.plotly_chart(fig, use_container_width=True)
 
-    if not headers:
-        print("❌ Tidak ada data valid.")
-        return
+st.markdown("### MFI vs Harga")
+fig2 = px.line(saham_df, x="Last Trading Date", y=["MFI14", "Close"], markers=True)
+fig2.update_layout(yaxis_title="MFI / Harga")
+st.plotly_chart(fig2, use_container_width=True)
 
-    df = pd.DataFrame(all_data, columns=headers)
-    print(f"📊 Total baris: {len(df)}")
-
-    # 🔢 Konversi kolom numerik
-    for col in ['High', 'Low', 'Close', 'Volume', 'Foreign Buy', 'Foreign Sell', 'Bid Volume', 'Offer Volume', 'Previous']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    df["VWAP"] = (df["High"] + df["Low"] + df["Close"]) / 3
-    df["Last Trading Date"] = df["Last Trading Date"].apply(lambda x: convert_indonesian_date(str(x)))
-    df.loc[df["Last Trading Date"].isna(), "Last Trading Date"] = df.loc[df["Last Trading Date"].isna(), "Source File"].apply(extract_date_from_filename)
-
-    df["Week"] = df["Last Trading Date"].dt.isocalendar().week.astype(str).str.zfill(2)
-    df["Year"] = df["Last Trading Date"].dt.year.astype(str)
-    df["Week"] = df["Week"] + "-" + df["Year"]
-    df.drop(columns=["Year"], inplace=True)
-
-    median_volume = df["Volume"].median()
-    df["Signal"] = df.apply(lambda row: (
-        "Akumulasi" if row["Close"] > row["VWAP"] and row["Volume"] > median_volume
-        else "Distribusi" if row["Close"] < row["VWAP"] and row["Volume"] > median_volume
-        else "Netral"
-    ), axis=1)
-
-    df["Money Flow"] = df["VWAP"] * df["Volume"]
-    df.sort_values(by=["Stock Code", "Last Trading Date"], inplace=True)
-    df["Prev VWAP"] = df.groupby("Stock Code")["VWAP"].shift(1)
-    df["Flow Direction"] = df.apply(
-        lambda row: "Positive" if row["VWAP"] > row["Prev VWAP"]
-        else "Negative" if row["VWAP"] < row["Prev VWAP"]
-        else "Neutral", axis=1
-    )
-    df["Positive Flow"] = df.apply(lambda row: row["Money Flow"] if row["Flow Direction"] == "Positive" else 0, axis=1)
-    df["Negative Flow"] = df.apply(lambda row: row["Money Flow"] if row["Flow Direction"] == "Negative" else 0, axis=1)
-
-    df["PosFlow14"] = df.groupby("Stock Code")["Positive Flow"].transform(lambda x: x.rolling(window=14, min_periods=1).sum())
-    df["NegFlow14"] = df.groupby("Stock Code")["Negative Flow"].transform(lambda x: x.rolling(window=14, min_periods=1).sum())
-
-    def calculate_mfi(row):
-        pos = row["PosFlow14"]
-        neg = row["NegFlow14"]
-        if neg == 0:
-            return 100
-        ratio = pos / neg
-        return round(100 - (100 / (1 + ratio)), 2)
-
-    df["MFI14"] = df.apply(calculate_mfi, axis=1)
-    df["MFI Signal"] = df["MFI14"].apply(lambda mfi: "Overbought" if mfi >= 80 else "Oversold" if mfi <= 20 else "Normal")
-
-    df["Foreign Flow"] = df.apply(lambda row: "Inflow" if row["Foreign Buy"] > row["Foreign Sell"] * 2
-                                   else "Outflow" if row["Foreign Sell"] > row["Foreign Buy"] * 2
-                                   else "Netral", axis=1)
-
-    df["Bid/Offer Imbalance"] = df.apply(lambda row: 0 if pd.isna(row["Bid Volume"]) or pd.isna(row["Offer Volume"]) or (row["Bid Volume"] + row["Offer Volume"]) == 0
-                                          else (row["Bid Volume"] - row["Offer Volume"]) / (row["Bid Volume"] + row["Offer Volume"]), axis=1)
-
-    df["Final Signal"] = df.apply(lambda row: "Strong Akumulasi" if row["Signal"] == "Akumulasi" and row["Bid/Offer Imbalance"] > 0.3
-                                   else "Strong Distribusi" if row["Signal"] == "Distribusi" and row["Bid/Offer Imbalance"] < -0.3
-                                   else row["Signal"], axis=1)
-
-    df["Unusual Volume"] = df["Volume"] > (2 * median_volume)
-
-    sector_df = pd.read_csv(sector_file_name)
-    df = df.merge(sector_df, how='left', left_on='Stock Code', right_on='Stock Code')
-    df['Sector'] = df['Sector'].fillna('Others')
-
-    print("📤 Upload ke Google Cloud Storage...")
-    success = upload_to_gcs(df, GCS_BUCKET, GCS_FILENAME)
-
-    if success:
-        print("🎉 Berhasil! File tersimpan di GCS.")
-    else:
-        print("⚠️ Gagal upload ke GCS.")
-
-if __name__ == "__main__":
-    main()
+st.markdown("---")
+st.caption("Made with ❤️ using Streamlit + Plotly • v1")
